@@ -17,8 +17,8 @@ RUN npm ci
 COPY src ./src/
 
 # Compile TypeScript and generate Prisma Client
-RUN npm run build
 RUN npx prisma generate
+RUN npm run build
 
 # --- Runner Stage ---
 FROM node:22-alpine AS runner
