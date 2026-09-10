@@ -4,7 +4,8 @@
   "description": "Egypt Discord Bot for WarEra",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc",
+  "postinstall": "prisma generate",
+  "build": "tsc",
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
     "prisma:generate": "prisma generate",
