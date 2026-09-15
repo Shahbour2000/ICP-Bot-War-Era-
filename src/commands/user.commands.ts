@@ -248,11 +248,13 @@ export class UserCommands {
     const weeklyDamageRank = weeklyRankNum ? `#${weeklyRankNum}` : 'Unranked';
 
     const badgeText = profile._id === '6933026bcb40c06497f414f3' ? ' • ☝️ القدوة' : '';
+    const badgeText = profile._id === '6a5ce045f3fc7e579e2d159c' ? ' • ☝️ القدوة' : '';
 
-    let activeMuText = muName;
-    if (profile.mu === '69ced3d6c23c7a8448383f28') {
-      activeMuText += '\n\u200F🏴 تحت حماية الرايات السوداء.';
-    }
+    const blackFlagsMuIds = ['69ced3d6c23c7a8448383f28', '6a67953fa483fa5aa897bef5'];
+let activeMuText = muName;
+if (profile.mu && blackFlagsMuIds.includes(profile.mu)) {
+  activeMuText += '\n\u200F🏴 تحت حماية الرايات السوداء.';
+}
 
     const embed = new EmbedBuilder()
       .setColor('#2b2d31') // Modern dark invisible color for premium feel
@@ -264,7 +266,7 @@ export class UserCommands {
         { name: '\u200B', value: '\u200B', inline: true }, // Empty field for alignment
         { name: '🏛 Current Active MU', value: activeMuText, inline: false }
       )
-      .setFooter({ text: 'Egypt Roles Bot • Developed by El-Gaiiar' });
+      .setFooter({ text: 'ICP Roles Bot • Developed by AbuDujana' });
 
     if (ownedMusList) {
       embed.addFields({ name: '👑 Owned Military Units', value: ownedMusList, inline: false });
