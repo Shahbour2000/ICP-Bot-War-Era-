@@ -1,12 +1,28 @@
 import * as http from 'http';
 import { logger } from './utils/logger';
 import { UserLinkRepository } from './repositories/userLink.repository';
+import { GuildConfigRepository } from './repositories/guildConfig.repository';
+import { RoleMappingRepository } from './repositories/roleMapping.repository';
+import { ProfileFlairRepository } from './repositories/profileFlair.repository';
+import { RoleMappingService } from './services/roleMapping.service';
+import { ProfileFlairService } from './services/profileFlair.service';
+import { WarEraService } from './warera/service';
+import { WarEraClient } from './warera/client';
 import { config } from './config';
+import { Client } from 'discord.js';
+import { handleDashboardRequest } from './dashboard/router';
 
 export interface ServerOptions {
   port: number;
   isReady?: () => boolean;
   userLinkRepo?: UserLinkRepository;
+  /** Lazily reads the live Discord client — may be null before login completes. */
+  getClient?: () => Client | null;
+  guildConfigRepo?: GuildConfigRepository;
+  roleMappingService?: RoleMappingService;
+  profileFlairService?: ProfileFlairService;
+  profileFlairRepo?: ProfileFlairRepository;
+  wareraService?: WarEraService;
 }
 
 export function startHealthServer(
@@ -20,6 +36,12 @@ export function startHealthServer(
 
   const { port, isReady } = options;
   const userLinkRepo = options.userLinkRepo || new UserLinkRepository();
+  const getClient = options.getClient || (() => null);
+  const guildConfigRepo = options.guildConfigRepo || new GuildConfigRepository();
+  const roleMappingService = options.roleMappingService || new RoleMappingService(new RoleMappingRepository());
+  const profileFlairRepo = options.profileFlairRepo || new ProfileFlairRepository();
+  const profileFlairService = options.profileFlairService || new ProfileFlairService(profileFlairRepo);
+  const wareraService = options.wareraService || new WarEraService(new WarEraClient());
 
   const server = http.createServer(async (req, res) => {
     // Set standard CORS headers
@@ -45,6 +67,27 @@ export function startHealthServer(
       pathname = reqUrl.split('?')[0];
     }
 
+    // 0. Dashboard (OAuth2 login + guild settings) — see src/dashboard/router.ts
+    if (pathname.startsWith('/dashboard')) {
+      try {
+        await handleDashboardRequest(req, res, pathname, {
+          getClient,
+          guildConfigRepo,
+          roleMappingService,
+          profileFlairService,
+          profileFlairRepo,
+          wareraService,
+        });
+      } catch (err) {
+        logger.error({ error: (err as Error).message, pathname }, 'Dashboard request failed');
+        if (!res.headersSent) {
+          res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end('<h1>Something went wrong</h1>');
+        }
+      }
+      return;
+    }
+
     // 1. Health & Ping check (public, no authentication required)
     if (req.method === 'GET' && (pathname === '/' || pathname === '/health' || pathname === '/ping')) {
       const ready = isReady ? isReady() : true;
@@ -55,7 +98,7 @@ export function startHealthServer(
       res.end(
         JSON.stringify({
           status: 'ok',
-          service: 'warera-egypt-bot',
+          service: 'warera-discord-bot',
           discordReady: ready,
           uptime: Math.floor(process.uptime()),
           timestamp: new Date().toISOString(),

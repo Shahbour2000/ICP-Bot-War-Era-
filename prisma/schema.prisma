@@ -19,9 +19,26 @@ model UserLink {
   exemptFromRecruitment      Boolean   @default(false) // Recruitment exemption flag
 }
 
+enum CommunityType {
+  COUNTRY_GOVERNMENT
+  POLITICAL_PARTY
+  MILITARY_UNIT
+  ORGANIZATION
+  CUSTOM
+}
+
+enum ProfileFlairTriggerType {
+  SPECIFIC_USERS
+  MILITARY_UNITS
+}
+
 model GuildConfig {
   id                    String   @id @default(uuid())
   guildId               String   @unique
+
+  // --- DEPRECATED (kept for one release cycle as a rollback safety net) ---
+  // RoleSyncService no longer reads these — see RoleMapping below. Do not add
+  // new fields here; add a new RoleMapping type instead.
   citizenRoleId         String?
   presidentRoleId       String?
   vicePresidentRoleId   String?
@@ -29,17 +46,107 @@ model GuildConfig {
   warRoleId             String?
   economyRoleId         String?
   hybridRoleId          String?
-  officerRoleId         String?  // Configured officer role for MoD access
-  trustedRoleId         String?  // MUST have this role to sync and participate in MoD systems
-  muCommanderRoleId     String?  // Assigned if player is commander of their MU
-  muOwnerRoleId         String?  // Assigned if player is owner/founder of their MU
-  noMuRoleId            String?  // Assigned if player is not in any MU
-  partyId               String?  // WarEra Party ID this Discord guild represents (source of truth stays on WarEra)
-  partyPresidentRoleId  String?  // Assigned if player is the leader of the configured party
-  partyTreasurerRoleId  String?  // Assigned if player is the treasurer of the configured party
-  partyCouncilRoleId    String?  // Assigned if player is a council member of the configured party
-  partyMemberRoleId     String?  // Assigned to any member of the configured party (incl. president/treasurer/council)
+  officerRoleId         String?
+  trustedRoleId         String?
+  muCommanderRoleId     String?
+  muOwnerRoleId         String?
+  noMuRoleId            String?
+  partyPresidentRoleId  String?
+  partyTreasurerRoleId  String?
+  partyCouncilRoleId    String?
+  partyMemberRoleId     String?
+
+  // --- Generic community identity (cosmetic/wizard framing only — NEVER a functional gate) ---
+  communityType         CommunityType @default(CUSTOM)
+  communityName         String?
+  description           String?
+
+  // --- WarEra identifiers (independently nullable — a guild only sets what applies to it) ---
+  countryId             String?
+  countryName           String?  // cached display name; WarEra API remains source of truth for validity
+  partyId               String?  // pre-existing field, unchanged
+  partyName             String?  // cached display name, resolved and validated at save time
+  muId                  String?
+  muName                String?  // cached display name, resolved and validated at save time
+
+  // --- Branding ---
+  logoUrl               String?
+  accentColor           String?
+
+  // --- Verification behavior ---
+  citizenshipCheckEnabled Boolean @default(false)
+
   updatedAt             DateTime @updatedAt
+
+  roleMappings          RoleMapping[]
+  messageTemplates      MessageTemplate[]
+  profileFlairs         ProfileFlair[]
+}
+
+model RoleMapping {
+  id            String      @id @default(uuid())
+  guildConfig   GuildConfig @relation(fields: [guildConfigId], references: [id], onDelete: Cascade)
+  guildConfigId String
+  /// Validated server-side against the ROLE_MAPPING_TYPES allow-list in code, not a DB enum —
+  /// see src/services/roleMapping.service.ts for rationale (extensibility without a migration).
+  type          String
+  discordRoleId String
+  enabled       Boolean     @default(true)
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  @@unique([guildConfigId, type])
+  @@index([guildConfigId])
+}
+
+model MessageTemplate {
+  id            String      @id @default(uuid())
+  guildConfig   GuildConfig @relation(fields: [guildConfigId], references: [id], onDelete: Cascade)
+  guildConfigId String
+  /// One of the real, audited keys in src/services/messageTemplate.service.ts (e.g. "verify_success").
+  key           String
+  content       String
+  updatedAt     DateTime    @updatedAt
+
+  @@unique([guildConfigId, key])
+}
+
+model ProfileFlair {
+  id            String      @id @default(uuid())
+  guildConfig   GuildConfig @relation(fields: [guildConfigId], references: [id], onDelete: Cascade)
+  guildConfigId String
+  name          String
+  triggerType   ProfileFlairTriggerType
+  displayText   String
+  enabled       Boolean     @default(true)
+  priority      Int         @default(0)
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  userTargets   ProfileFlairUserTarget[]
+  muTargets     ProfileFlairMuTarget[]
+
+  @@index([guildConfigId])
+}
+
+model ProfileFlairUserTarget {
+  id           String       @id @default(uuid())
+  flair        ProfileFlair @relation(fields: [flairId], references: [id], onDelete: Cascade)
+  flairId      String
+  wareraUserId String
+
+  @@unique([flairId, wareraUserId])
+  @@index([wareraUserId])
+}
+
+model ProfileFlairMuTarget {
+  id      String       @id @default(uuid())
+  flair   ProfileFlair @relation(fields: [flairId], references: [id], onDelete: Cascade)
+  flairId String
+  muId    String
+
+  @@unique([flairId, muId])
+  @@index([muId])
 }
 
 model MuRole {

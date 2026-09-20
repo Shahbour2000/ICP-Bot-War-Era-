@@ -2,6 +2,7 @@ import { RecruitmentCampaign, UserLink } from '@prisma/client';
 import { Guild } from 'discord.js';
 import { prisma } from '../database';
 import { WarEraService } from '../warera/service';
+import { RoleMappingService } from './roleMapping.service';
 import { UserGetUserLiteResponse } from '../types/Responses';
 import { logger } from '../utils/logger';
 
@@ -25,7 +26,10 @@ export interface DetailedCampaignReport extends CampaignStats {
 }
 
 export class RecruitmentService {
-  constructor(private readonly wareraService: WarEraService) {}
+  constructor(
+    private readonly wareraService: WarEraService,
+    private readonly roleMappingService: RoleMappingService
+  ) {}
 
   /**
    * Starts a new recruitment campaign (deactivates existing campaigns first)
@@ -137,7 +141,13 @@ export class RecruitmentService {
       where: { guildId: guild.id },
     });
 
-    const egyptId = await this.wareraService.getEgyptCountryId();
+    if (!config?.countryId) {
+      logger.warn({ guildId: guild.id }, 'Recruitment eligibility check skipped: no countryId configured for this guild');
+      return { campaign, eligibleList: [] };
+    }
+    const countryId = config.countryId;
+
+    const roleMap = await this.roleMappingService.getEnabledMap(config.id);
     const userLinks = await prisma.userLink.findMany({
       where: { exemptFromRecruitment: false },
     });
@@ -152,20 +162,18 @@ export class RecruitmentService {
           const member = await guild.members.fetch({ user: link.discordId, force: true }).catch(() => null);
           if (!member) return;
 
-          // Check citizen & trusted role requirements
-          if (config) {
-            const hasCitizen = config.citizenRoleId ? member.roles.cache.has(config.citizenRoleId) : true;
-            const hasTrusted = config.trustedRoleId ? member.roles.cache.has(config.trustedRoleId) : true;
-            if (!hasCitizen || !hasTrusted) {
-              return;
-            }
+          // Check citizen & trusted gate role requirements
+          const hasCitizen = roleMap.CITIZEN_GATE ? member.roles.cache.has(roleMap.CITIZEN_GATE) : true;
+          const hasTrusted = roleMap.TRUSTED_GATE ? member.roles.cache.has(roleMap.TRUSTED_GATE) : true;
+          if (!hasCitizen || !hasTrusted) {
+            return;
           }
 
           const profile = await this.wareraService.getUserProfile(link.wareraUserId);
           const level = profile.leveling?.level || 0;
-          const belongsToEgypt = profile.country === egyptId;
+          const belongsToConfiguredCountry = profile.country === countryId;
 
-          if (belongsToEgypt && level >= campaign.minimumLevel) {
+          if (belongsToConfiguredCountry && level >= campaign.minimumLevel) {
             eligibleList.push({ link, profile });
           }
         } catch (error) {

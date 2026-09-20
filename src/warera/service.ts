@@ -15,7 +15,7 @@ import { logger } from '../utils/logger';
 
 export class WarEraService {
   private readonly client: WarEraClient;
-  private egyptCountryId: string | null = null;
+  private countryIdCache: Record<string, string> = {};
   private countryCache: CountryListItem[] | null = null;
   private countryCacheTimestamp: number = 0;
   
@@ -75,25 +75,35 @@ export class WarEraService {
   }
 
   /**
-   * Finds the country ID for Egypt
+   * Fetches a WarEra country by its exact ID. Used to validate /config
+   * country-id before saving — an invalid ID throws, and the caller must
+   * never persist an unvalidated ID.
    */
-  async getEgyptCountryId(): Promise<string> {
-    if (this.egyptCountryId) {
-      return this.egyptCountryId;
+  async getCountryById(countryId: string): Promise<{ _id: string; name: string; code: string }> {
+    return this.client.request('country.getCountryById', { countryId });
+  }
+
+  /**
+   * Finds a WarEra country's ID by name or ISO-style code (case-insensitive).
+   * Used ONLY by the one-time ICP migration script to resolve "Egypt" once
+   * historically — runtime role sync never calls this; it reads countryId
+   * directly from each guild's own GuildConfig instead.
+   */
+  async getCountryId(nameOrCode: string): Promise<string> {
+    const key = nameOrCode.toLowerCase();
+    if (this.countryIdCache[key]) {
+      return this.countryIdCache[key];
     }
 
     const countries = await this.getAllCountries();
-    const egypt = countries.find(
-      (c) => c.name.toLowerCase() === 'egypt' || c.code.toLowerCase() === 'eg'
-    );
+    const match = countries.find((c) => c.name.toLowerCase() === key || c.code.toLowerCase() === key);
 
-    if (!egypt) {
-      logger.error('Egypt country profile not found in WarEra countries list');
-      throw new Error('Egypt country profile not found on WarEra');
+    if (!match) {
+      throw new Error(`No WarEra country found matching "${nameOrCode}"`);
     }
 
-    this.egyptCountryId = egypt._id;
-    return this.egyptCountryId;
+    this.countryIdCache[key] = match._id;
+    return match._id;
   }
 
   /**
@@ -111,14 +121,13 @@ export class WarEraService {
   }
 
   /**
-   * Fetches all Military Units globally and filters them by Egypt country ID
+   * Fetches all Military Units globally and filters them by a given country ID
    */
-  async getAllEgyptMus(): Promise<MuListItem[]> {
-    const egyptId = await this.getEgyptCountryId();
+  async getAllMusForCountry(countryId: string): Promise<MuListItem[]> {
     let allMus: MuListItem[] = [];
     let nextCursor: string | undefined = undefined;
 
-    logger.info('Fetching all MUs from WarEra API to filter for Egypt...');
+    logger.info({ countryId }, 'Fetching all MUs from WarEra API to filter by country...');
 
     while (true) {
       const response: MuGetManyPaginatedResponse = await this.client.request('mu.getManyPaginated', {
@@ -137,10 +146,10 @@ export class WarEraService {
       }
     }
 
-    const egyptMus = allMus.filter((mu) => mu.country === egyptId);
-    logger.info({ totalGlobal: allMus.length, totalEgypt: egyptMus.length }, 'Completed fetching Egypt MUs');
+    const countryMus = allMus.filter((mu) => mu.country === countryId);
+    logger.info({ totalGlobal: allMus.length, totalMatched: countryMus.length }, 'Completed fetching MUs for country');
     
-    return egyptMus;
+    return countryMus;
   }
 
   /**
@@ -172,10 +181,13 @@ export class WarEraService {
   }
 
   /**
-   * Calculates the Egypt-specific ranking for a user using a 5-minute memory cache
+   * Calculates a country-specific ranking for a user using a 5-minute memory cache
    */
-  async getEgyptUserRank(userId: string, rankingType: 'userDamages' | 'weeklyUserDamages'): Promise<number | null> {
-    const egyptId = await this.getEgyptCountryId();
+  async getCountryUserRank(
+    userId: string,
+    rankingType: 'userDamages' | 'weeklyUserDamages',
+    countryId: string
+  ): Promise<number | null> {
     const cacheKey = rankingType;
     const cacheDuration = 5 * 60 * 1000; // 5 minutes
 
@@ -194,14 +206,14 @@ export class WarEraService {
 
     if (items.length === 0) return null;
 
-    // Filter strictly to Egypt players
-    const egyptRankings = items.filter(r => r.country === egyptId);
+    // Filter strictly to players of the given country
+    const countryRankings = items.filter(r => r.country === countryId);
     
     // Sort descending by value to ensure accurate ranking
-    egyptRankings.sort((a, b) => b.value - a.value);
+    countryRankings.sort((a, b) => b.value - a.value);
 
     // Find the user's position
-    const rankIndex = egyptRankings.findIndex(r => r.user === userId);
+    const rankIndex = countryRankings.findIndex(r => r.user === userId);
     
     if (rankIndex === -1) return null;
     return rankIndex + 1;

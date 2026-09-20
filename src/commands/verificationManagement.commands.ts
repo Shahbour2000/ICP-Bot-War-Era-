@@ -11,12 +11,14 @@ import {
 } from 'discord.js';
 import { VerificationManagementService, VerifiedUserData } from '../services/verificationManagement.service';
 import { GuildConfigRepository } from '../repositories/guildConfig.repository';
+import { RoleMappingService } from '../services/roleMapping.service';
 import { logger } from '../utils/logger';
 
 export class VerificationManagementCommands {
   constructor(
     private readonly verificationManagementService: VerificationManagementService,
-    private readonly guildConfigRepo: GuildConfigRepository
+    private readonly guildConfigRepo: GuildConfigRepository,
+    private readonly roleMappingService: RoleMappingService
   ) {}
 
   private async isOfficerOrAdmin(interaction: ChatInputCommandInteraction): Promise<boolean> {
@@ -28,8 +30,14 @@ export class VerificationManagementCommands {
     }
 
     const config = await this.guildConfigRepo.getByGuildId(interaction.guildId || '');
-    if (config && config.officerRoleId) {
-      return member.roles.cache.has(config.officerRoleId);
+    if (!config) return false;
+
+    // Prefer the new RoleMapping (OFFICER); fall back to the old officerRoleId column
+    // during the compatibility window in case a guild's data hasn't been migrated yet.
+    const roleMap = await this.roleMappingService.getEnabledMap(config.id);
+    const officerRoleId = roleMap.OFFICER || config.officerRoleId;
+    if (officerRoleId) {
+      return member.roles.cache.has(officerRoleId);
     }
 
     return false;
@@ -96,7 +104,7 @@ export class VerificationManagementCommands {
         .setTitle('✅ Verified Users List')
         .setColor('#D00000')
         .setDescription(`**Stats Overview:**\n• Total Verified: **${totalCount}**\n• Trusted: **${trusted.length}**\n• Untrusted: **${untrusted.length}**`)
-        .setFooter({ text: `Egypt Roles Bot • Developed by El-Gaiiar | Page ${page + 1} of ${totalPages} • Filter: ${filterTrusted !== null ? (filterTrusted ? 'Trusted Only' : 'Untrusted Only') : 'None'}` });
+        .setFooter({ text: `WarEra Roles Bot | Page ${page + 1} of ${totalPages} • Filter: ${filterTrusted !== null ? (filterTrusted ? 'Trusted Only' : 'Untrusted Only') : 'None'}` });
 
       if (pageData.length === 0) {
         embed.addFields({ name: 'No users found', value: 'There are no users matching this filter.' });

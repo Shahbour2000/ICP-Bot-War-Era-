@@ -9,6 +9,8 @@ import {
 } from 'discord.js';
 import { VerificationService } from '../services/verification.service';
 import { RoleSyncService, determinePartyPosition } from '../services/roleSync.service';
+import { ProfileFlairService } from '../services/profileFlair.service';
+import { MessageTemplateService } from '../services/messageTemplate.service';
 import { WarEraService } from '../warera/service';
 import { GuildConfigRepository } from '../repositories/guildConfig.repository';
 import { logger } from '../utils/logger';
@@ -27,7 +29,9 @@ export class UserCommands {
     private readonly verificationService: VerificationService,
     private readonly roleSyncService: RoleSyncService,
     private readonly wareraService: WarEraService,
-    private readonly guildConfigRepo?: GuildConfigRepository
+    private readonly guildConfigRepo?: GuildConfigRepository,
+    private readonly profileFlairService?: ProfileFlairService,
+    private readonly messageTemplateService?: MessageTemplateService
   ) {}
 
   /**
@@ -178,6 +182,15 @@ export class UserCommands {
     interaction: ChatInputCommandInteraction,
     profile: UserGetUserLiteResponse
   ): Promise<EmbedBuilder> {
+    // Resolve this guild's configuration once — reused for country ranking, branding,
+    // profile flairs, and party display below. Every guild-specific feature degrades
+    // gracefully (simply omitted) if no config/countryId is set, rather than assuming
+    // any particular country or community.
+    const guildConfig =
+      this.guildConfigRepo && interaction.guildId
+        ? await this.guildConfigRepo.getByGuildId(interaction.guildId).catch(() => null)
+        : null;
+
     // Fetch MU details
     let muName: string = 'None';
     if (profile.mu) {
@@ -201,14 +214,17 @@ export class UserCommands {
       logger.warn({ error: (err as Error).message }, 'Failed to fetch owned MUs');
     }
 
-    // Fetch Local Egypt Rankings
+    // Fetch this guild's configured-country rankings (skipped entirely if no
+    // countryId is configured — there is no default/assumed country).
     let totalRankNum: number | null = null;
     let weeklyRankNum: number | null = null;
-    try {
-      totalRankNum = await this.wareraService.getEgyptUserRank(profile._id, 'userDamages');
-      weeklyRankNum = await this.wareraService.getEgyptUserRank(profile._id, 'weeklyUserDamages');
-    } catch (err) {
-      logger.warn({ error: (err as Error).message }, 'Failed to fetch Egypt rankings');
+    if (guildConfig?.countryId) {
+      try {
+        totalRankNum = await this.wareraService.getCountryUserRank(profile._id, 'userDamages', guildConfig.countryId);
+        weeklyRankNum = await this.wareraService.getCountryUserRank(profile._id, 'weeklyUserDamages', guildConfig.countryId);
+      } catch (err) {
+        logger.warn({ error: (err as Error).message }, 'Failed to fetch country rankings');
+      }
     }
 
     // Compute Specialization
@@ -240,39 +256,59 @@ export class UserCommands {
     }
 
     // Prepare variables
-    // Prepare variables
     const level = profile.leveling?.level !== undefined ? profile.leveling.level : '?';
     const totalDamage = profile.stats?.damagesCount !== undefined ? profile.stats.damagesCount.toLocaleString() : '0';
     const totalDamageRank = totalRankNum ? `#${totalRankNum}` : 'Unranked';
     const weeklyDamage = profile.rankings?.weeklyUserDamages?.value !== undefined ? profile.rankings.weeklyUserDamages.value.toLocaleString() : '0';
     const weeklyDamageRank = weeklyRankNum ? `#${weeklyRankNum}` : 'Unranked';
+    const countryLabel = guildConfig?.countryName || guildConfig?.countryId ? (guildConfig?.countryName || 'Country') : null;
 
-    const badgeText = profile._id === '6933026bcb40c06497f414f3' ? ' • ☝️ القدوة' : '';
-    const badgeText = profile._id === '6a5ce045f3fc7e579e2d159c' ? ' • ☝️ القدوة' : '';
+    // --- Profile Flairs ---
+    // Generic, per-guild configurable badge/flair system (dashboard: "Profile Flairs").
+    // No WarEra user ID, MU ID, or display text is hardcoded here at all — everything
+    // comes from this guild's own ProfileFlair rules. See profileFlair.service.ts.
+    let flairBadgeText = '';
+    if (guildConfig && this.profileFlairService) {
+      try {
+        const flairTexts = await this.profileFlairService.getMatchingFlairText(guildConfig.id, {
+          _id: profile._id,
+          mu: profile.mu,
+        });
+        if (flairTexts.length > 0) {
+          flairBadgeText = ' • ' + flairTexts.join(' • ');
+        }
+      } catch (flairErr) {
+        logger.warn({ error: (flairErr as Error).message }, 'Failed to evaluate profile flairs');
+      }
+    }
 
-    const blackFlagsMuIds = ['69ced3d6c23c7a8448383f28', '6a67953fa483fa5aa897bef5'];
-let activeMuText = muName;
-if (profile.mu && blackFlagsMuIds.includes(profile.mu)) {
-  activeMuText += '\n\u200F🏴 تحت حماية الرايات السوداء.';
-}
+    const activeMuText = muName;
 
     const embed = new EmbedBuilder()
-      .setColor('#2b2d31') // Modern dark invisible color for premium feel
+      .setColor((guildConfig?.accentColor as `#${string}`) || '#2b2d31') // Modern dark invisible color for premium feel
       .setThumbnail(profile.avatarUrl || 'https://raw.githubusercontent.com/discord/discord-logo-template/master/discord-logo-blue.png')
-      .setDescription(`**👤 ${profile.username}${badgeText}**\n**⭐ Level:** ${level}\n\n**${specializationText}**${specializationSubText}`)
+      .setDescription(`**👤 ${profile.username}${flairBadgeText}**\n**⭐ Level:** ${level}\n\n**${specializationText}**${specializationSubText}`)
       .addFields(
-        { name: '⚔ Total Damage', value: `${totalDamage}\n🇪🇬 Egypt Rank: **${totalDamageRank}**`, inline: true },
-        { name: '🔥 Weekly Damage', value: `${weeklyDamage}\n🇪🇬 Egypt Rank: **${weeklyDamageRank}**`, inline: true },
+        { name: '⚔ Total Damage', value: countryLabel ? `${totalDamage}\n${countryLabel} Rank: **${totalDamageRank}**` : totalDamage, inline: true },
+        { name: '🔥 Weekly Damage', value: countryLabel ? `${weeklyDamage}\n${countryLabel} Rank: **${weeklyDamageRank}**` : weeklyDamage, inline: true },
         { name: '\u200B', value: '\u200B', inline: true }, // Empty field for alignment
         { name: '🏛 Current Active MU', value: activeMuText, inline: false }
-      )
-      .setFooter({ text: 'ICP Roles Bot • Developed by AbuDujana' });
+      );
+
+    if (this.messageTemplateService && guildConfig) {
+      const footerText = await this.messageTemplateService.render(guildConfig.id, 'branding_footer', {
+        communityName: guildConfig.communityName || interaction.guild?.name || 'WarEra',
+      });
+      embed.setFooter({ text: footerText });
+    } else {
+      embed.setFooter({ text: 'WarEra Roles Bot' });
+    }
 
     if (ownedMusList) {
       embed.addFields({ name: '👑 Owned Military Units', value: ownedMusList, inline: false });
     }
 
-    // Special top ranking messages
+    // Special top ranking messages (only meaningful when a country ranking exists)
     const isRank1 = totalRankNum === 1 || weeklyRankNum === 1;
     const isTop10 = (totalRankNum !== null && totalRankNum >= 2 && totalRankNum <= 10) || 
                     (weeklyRankNum !== null && weeklyRankNum >= 2 && weeklyRankNum <= 10);
@@ -286,22 +322,19 @@ if (profile.mu && blackFlagsMuIds.includes(profile.mu)) {
     // --- Political Party ---
     // Only shown for guilds that have configured a WarEra Party ID (/config party-id).
     // Position is derived live from WarEra's party roster, never from a stored value.
-    if (this.guildConfigRepo && interaction.guildId) {
+    if (guildConfig?.partyId) {
       try {
-        const guildConfig = await this.guildConfigRepo.getByGuildId(interaction.guildId);
-        if (guildConfig?.partyId) {
-          const party = await this.wareraService.getParty(guildConfig.partyId);
-          const position = determinePartyPosition(party, profile._id);
-          const positionLabel = PARTY_POSITION_LABELS[position];
+        const party = await this.wareraService.getParty(guildConfig.partyId);
+        const position = determinePartyPosition(party, profile._id);
+        const positionLabel = PARTY_POSITION_LABELS[position];
 
-          embed.addFields({
-            name: '🏛️ Political Party',
-            value: positionLabel
-              ? `${party.name || 'Configured Party'}\n**Position:** ${positionLabel}`
-              : `Not currently a member of **${party.name || 'the configured party'}**`,
-            inline: false,
-          });
-        }
+        embed.addFields({
+          name: '🏛️ Political Party',
+          value: positionLabel
+            ? `${party.name || 'Configured Party'}\n**Position:** ${positionLabel}`
+            : `Not currently a member of **${party.name || 'the configured party'}**`,
+          inline: false,
+        });
       } catch (partyErr) {
         logger.warn({ error: (partyErr as Error).message }, 'Failed to fetch party details for profile embed');
       }

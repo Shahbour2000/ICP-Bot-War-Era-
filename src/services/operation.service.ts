@@ -1,6 +1,8 @@
 import { Operation, OperationResponse } from '@prisma/client';
 import { prisma } from '../database';
 import { WarEraService } from '../warera/service';
+import { RoleMappingService } from './roleMapping.service';
+import { MessageTemplateService } from './messageTemplate.service';
 import { Client, ActionRowBuilder, ButtonBuilder, ButtonStyle } from 'discord.js';
 import { logger } from '../utils/logger';
 
@@ -14,7 +16,11 @@ export interface OperationStats {
 }
 
 export class OperationService {
-  constructor(private readonly wareraService: WarEraService) {}
+  constructor(
+    private readonly wareraService: WarEraService,
+    private readonly roleMappingService: RoleMappingService,
+    private readonly messageTemplateService: MessageTemplateService
+  ) {}
 
   /**
    * Registers a new operation alert in the database
@@ -164,12 +170,17 @@ export class OperationService {
 
     logger.info({ operationId }, 'Beginning operation DM dispatch');
 
-    // 1. Get Egypt country ID to filter targets
-    const egyptId = await this.wareraService.getEgyptCountryId();
-    const userLinks = await prisma.userLink.findMany();
+    // 1. Get this guild's configured country to filter targets — not hardcoded to any one
     const config = await prisma.guildConfig.findUnique({
       where: { guildId: operation.guildId },
     });
+    const countryId = config?.countryId;
+    if (!countryId) {
+      logger.warn({ operationId, guildId: operation.guildId }, 'Operation dispatch skipped: no countryId configured for this guild');
+      return 0;
+    }
+    const roleMap = await this.roleMappingService.getEnabledMap(config.id);
+    const userLinks = await prisma.userLink.findMany();
     const guild = await client.guilds.fetch(operation.guildId).catch(() => null);
 
     const targetDiscordIds: string[] = [];
@@ -182,18 +193,16 @@ export class OperationService {
           const member = guild ? await guild.members.fetch({ user: link.discordId, force: true }).catch(() => null) : null;
           if (!member) return;
 
-          // Check citizen & trusted role requirements
-          if (config) {
-            const hasCitizen = config.citizenRoleId ? member.roles.cache.has(config.citizenRoleId) : true;
-            const hasTrusted = config.trustedRoleId ? member.roles.cache.has(config.trustedRoleId) : true;
-            if (!hasCitizen || !hasTrusted) {
-              return;
-            }
+          // Check citizen & trusted gate role requirements
+          const hasCitizen = roleMap.CITIZEN_GATE ? member.roles.cache.has(roleMap.CITIZEN_GATE) : true;
+          const hasTrusted = roleMap.TRUSTED_GATE ? member.roles.cache.has(roleMap.TRUSTED_GATE) : true;
+          if (!hasCitizen || !hasTrusted) {
+            return;
           }
 
           const profile = await this.wareraService.getUserProfile(link.wareraUserId);
-          const belongsToEgypt = profile.country === egyptId;
-          if (!belongsToEgypt) return; // Only notify players in Egypt country
+          const belongsToConfiguredCountry = profile.country === countryId;
+          if (!belongsToConfiguredCountry) return; // Only notify players in this guild's configured country
 
           const spec = this.getSpecialization(profile.skills || {});
           const level = profile.leveling?.level || 0;
@@ -263,8 +272,15 @@ export class OperationService {
       try {
         const user = await client.users.fetch(discordId).catch(() => null);
         if (user) {
+          const dmContent = await this.messageTemplateService.render(config.id, 'operation_alert_dm', {
+            communityName: config.communityName || guild?.name || 'Military',
+            title: operation.title,
+            message: operation.message,
+            issuer: issuerTag,
+            timestamp: `<t:${Math.floor(Date.now() / 1000)}:F>`,
+          });
           await user.send({
-            content: `🚨 **Egypt Military Operation**\n\n**Operation:**\n${operation.title}\n\n**Objective:**\n${operation.message}\n\n*Please join military channels immediately.*\n\n**Issued by:** ${issuerTag}\n**Time:** <t:${Math.floor(Date.now() / 1000)}:F>`,
+            content: dmContent,
             components: [row],
           });
           successfullySent++;

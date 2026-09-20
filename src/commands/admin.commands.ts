@@ -8,16 +8,13 @@ import {
   PermissionFlagsBits,
 } from 'discord.js';
 import { VerificationService } from '../services/verification.service';
-import { RoleSyncService, EDUCATION_LVL_1_ROLE_ID, EDUCATION_LVL_2_ROLE_ID } from '../services/roleSync.service';
+import { RoleSyncService } from '../services/roleSync.service';
+import { RoleMappingService } from '../services/roleMapping.service';
 import { GuildConfigRepository } from '../repositories/guildConfig.repository';
 import { MuRoleRepository } from '../repositories/muRole.repository';
 import { LevelRoleRepository } from '../repositories/levelRole.repository';
 import { UserLinkRepository } from '../repositories/userLink.repository';
 import { logger } from '../utils/logger';
-
-export const FORCE_VERIFY_MODERATOR_ROLE_ID = '1500579625405780129';
-export const FORCE_VERIFY_EDUCATION_STAFF_ROLE_ID = '1477944138887331882';
-export const FORCE_VERIFY_AUTHORIZED_ROLE_ID = '1496865174920101970';
 
 export class AdminCommands {
   constructor(
@@ -26,7 +23,8 @@ export class AdminCommands {
     private readonly userLinkRepo: UserLinkRepository,
     private readonly guildConfigRepo: GuildConfigRepository,
     private readonly muRoleRepo: MuRoleRepository,
-    private readonly levelRoleRepo: LevelRoleRepository
+    private readonly levelRoleRepo: LevelRoleRepository,
+    private readonly roleMappingService: RoleMappingService
   ) {}
 
   /**
@@ -47,18 +45,22 @@ export class AdminCommands {
       return true;
     }
 
+    const config = await this.guildConfigRepo.getByGuildId(guild.id);
+    if (!config) return false;
+    const roleMap = await this.roleMappingService.getEnabledMap(config.id);
+
     // 2. Moderator role
-    if (member.roles.cache.has(FORCE_VERIFY_MODERATOR_ROLE_ID)) {
+    if (roleMap.FORCEVERIFY_MODERATOR && member.roles.cache.has(roleMap.FORCEVERIFY_MODERATOR)) {
       return true;
     }
 
     // 3. Education Staff role
-    if (member.roles.cache.has(FORCE_VERIFY_EDUCATION_STAFF_ROLE_ID)) {
+    if (roleMap.FORCEVERIFY_EDUCATION_STAFF && member.roles.cache.has(roleMap.FORCEVERIFY_EDUCATION_STAFF)) {
       return true;
     }
 
     // 4. Additional Authorized role
-    if (member.roles.cache.has(FORCE_VERIFY_AUTHORIZED_ROLE_ID)) {
+    if (roleMap.FORCEVERIFY_AUTHORIZED && member.roles.cache.has(roleMap.FORCEVERIFY_AUTHORIZED)) {
       return true;
     }
 
@@ -231,28 +233,13 @@ export class AdminCommands {
 
         const managedRoleIds = new Set<string>();
 
-        // Gather all role IDs managed by the bot
+        // Gather all role IDs managed by the bot from the generic RoleMapping system.
         if (config) {
-          [
-            config.presidentRoleId,
-            config.vicePresidentRoleId,
-            config.congressRoleId,
-            config.warRoleId,
-            config.economyRoleId,
-            config.hybridRoleId,
-            config.muCommanderRoleId,
-            config.muOwnerRoleId,
-            config.noMuRoleId,
-            config.partyPresidentRoleId,
-            config.partyTreasurerRoleId,
-            config.partyCouncilRoleId,
-            config.partyMemberRoleId,
-          ].forEach((id) => { if (id) managedRoleIds.add(id); });
+          const roleMap = await this.roleMappingService.getEnabledMap(config.id);
+          Object.values(roleMap).forEach((id) => { if (id) managedRoleIds.add(id); });
         }
         muRoles.forEach((r) => managedRoleIds.add(r.discordRoleId));
         levelRoles.forEach((r) => managedRoleIds.add(r.discordRoleId));
-        managedRoleIds.add(EDUCATION_LVL_1_ROLE_ID);
-        managedRoleIds.add(EDUCATION_LVL_2_ROLE_ID);
 
         const rolesToRemove = Array.from(managedRoleIds).filter((id) => member.roles.cache.has(id));
 

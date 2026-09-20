@@ -1,12 +1,14 @@
 import { ChatInputCommandInteraction, EmbedBuilder, GuildMember, PermissionFlagsBits } from 'discord.js';
 import { OperationService } from '../services/operation.service';
 import { GuildConfigRepository } from '../repositories/guildConfig.repository';
+import { RoleMappingService } from '../services/roleMapping.service';
 import { logger } from '../utils/logger';
 
 export class OperationCommands {
   constructor(
     private readonly operationService: OperationService,
-    private readonly guildConfigRepo: GuildConfigRepository
+    private readonly guildConfigRepo: GuildConfigRepository,
+    private readonly roleMappingService: RoleMappingService
   ) {}
 
   /**
@@ -21,8 +23,14 @@ export class OperationCommands {
     }
 
     const config = await this.guildConfigRepo.getByGuildId(interaction.guildId || '');
-    if (config && config.officerRoleId) {
-      return member.roles.cache.has(config.officerRoleId);
+    if (!config) return false;
+
+    // Prefer the new RoleMapping (OFFICER); fall back to the old officerRoleId column
+    // during the compatibility window in case a guild's data hasn't been migrated yet.
+    const roleMap = await this.roleMappingService.getEnabledMap(config.id);
+    const officerRoleId = roleMap.OFFICER || config.officerRoleId;
+    if (officerRoleId) {
+      return member.roles.cache.has(officerRoleId);
     }
 
     return false;
@@ -130,7 +138,7 @@ export class OperationCommands {
               .join('\n\n')
           )
           .setTimestamp()
-          .setFooter({ text: 'Egypt Roles Bot • Developed by El-Gaiiar' });
+          .setFooter({ text: 'WarEra Roles Bot' });
 
         await interaction.editReply({ embeds: [embed] });
       } catch (err) {
@@ -166,7 +174,7 @@ export class OperationCommands {
             { name: '📊 Response Rate', value: `${stats.responseRate.toFixed(1)}%`, inline: true }
           )
           .setTimestamp()
-          .setFooter({ text: 'Egypt Roles Bot • Developed by El-Gaiiar' });
+          .setFooter({ text: 'WarEra Roles Bot' });
 
         await interaction.editReply({ embeds: [embed] });
       } catch (err) {

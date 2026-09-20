@@ -6,11 +6,15 @@ import { startHealthServer } from './server';
 import { Client } from 'discord.js';
 
 async function bootstrap() {
-  logger.info('Starting WarEra Egypt Discord Bot...');
+  logger.info('Starting WarEra Discord Bot...');
   
   // 1. Start HTTP health check server immediately so Render detects the open port without delay
   let client: Client | null = null;
-  const httpServer = startHealthServer(config.port, () => client?.isReady() ?? false);
+  const httpServer = startHealthServer({
+    port: config.port,
+    isReady: () => client?.isReady() ?? false,
+    getClient: () => client,
+  });
 
   try {
     client = await initDiscordBot();

@@ -7,6 +7,9 @@ import { GuildConfigRepository } from '../repositories/guildConfig.repository';
 import { MuRoleRepository } from '../repositories/muRole.repository';
 import { LevelRoleRepository } from '../repositories/levelRole.repository';
 import { UserLinkRepository } from '../repositories/userLink.repository';
+import { RoleMappingRepository } from '../repositories/roleMapping.repository';
+import { MessageTemplateRepository } from '../repositories/messageTemplate.repository';
+import { ProfileFlairRepository } from '../repositories/profileFlair.repository';
 
 // Services
 import { WarEraClient } from '../warera/client';
@@ -19,6 +22,9 @@ import { RecruitmentService } from '../services/recruitment.service';
 import { OperationService } from '../services/operation.service';
 import { ReadinessService } from '../services/readiness.service';
 import { VerificationManagementService } from '../services/verificationManagement.service';
+import { RoleMappingService } from '../services/roleMapping.service';
+import { MessageTemplateService } from '../services/messageTemplate.service';
+import { ProfileFlairService } from '../services/profileFlair.service';
 
 // Commands
 import { UserCommands } from '../commands/user.commands';
@@ -47,6 +53,11 @@ export async function initDiscordBot(): Promise<Client> {
   });
 
   // 1. Dependency Injection Setup
+  // Every service below is a SINGLE shared instance for the whole process — this is
+  // correct multi-tenant design, not an anti-pattern: none of them hold any
+  // guild-specific state in memory. Every method takes a guildId/guild/guildConfigId
+  // parameter and reads that guild's own config/data fresh from the database on each
+  // call, so Guild A's data can never leak into a call made for Guild B.
   const wareraClient = new WarEraClient();
   const wareraService = new WarEraService(wareraClient);
 
@@ -54,42 +65,70 @@ export async function initDiscordBot(): Promise<Client> {
   const muRoleRepo = new MuRoleRepository();
   const levelRoleRepo = new LevelRoleRepository();
   const userLinkRepo = new UserLinkRepository();
+  const roleMappingRepo = new RoleMappingRepository();
+  const messageTemplateRepo = new MessageTemplateRepository();
+  const profileFlairRepo = new ProfileFlairRepository();
 
   const guildConfigService = new GuildConfigService(guildConfigRepo);
   const muRoleService = new MuRoleService(muRoleRepo, wareraService);
+  const roleMappingService = new RoleMappingService(roleMappingRepo);
+  const messageTemplateService = new MessageTemplateService(messageTemplateRepo);
+  const profileFlairService = new ProfileFlairService(profileFlairRepo);
+
   const roleSyncService = new RoleSyncService(
     guildConfigRepo,
     muRoleRepo,
     levelRoleRepo,
     userLinkRepo,
-    wareraService
+    wareraService,
+    roleMappingService,
+    messageTemplateService
   );
   const verificationService = new VerificationService(userLinkRepo, wareraService);
-  
+
   // New MoD Services
-  const recruitmentService = new RecruitmentService(wareraService);
-  const operationService = new OperationService(wareraService);
-  const readinessService = new ReadinessService(wareraService, recruitmentService);
+  const recruitmentService = new RecruitmentService(wareraService, roleMappingService);
+  const operationService = new OperationService(wareraService, roleMappingService, messageTemplateService);
+  const readinessService = new ReadinessService(wareraService, recruitmentService, roleMappingService);
   const verificationManagementService = new VerificationManagementService(guildConfigRepo, wareraService);
 
   // Command handlers
-  const userCommands = new UserCommands(verificationService, roleSyncService, wareraService, guildConfigRepo);
+  const userCommands = new UserCommands(
+    verificationService,
+    roleSyncService,
+    wareraService,
+    guildConfigRepo,
+    profileFlairService,
+    messageTemplateService
+  );
   const adminCommands = new AdminCommands(
     verificationService,
     roleSyncService,
     userLinkRepo,
     guildConfigRepo,
     muRoleRepo,
-    levelRoleRepo
+    levelRoleRepo,
+    roleMappingService
   );
-  const configCommands = new ConfigCommands(guildConfigService, muRoleService, levelRoleRepo);
-  
+  const configCommands = new ConfigCommands(
+    guildConfigService,
+    guildConfigRepo,
+    muRoleService,
+    levelRoleRepo,
+    roleMappingService,
+    wareraService
+  );
+
   // New MoD Command handlers
-  const recruitmentCommands = new RecruitmentCommands(recruitmentService, guildConfigRepo);
-  const operationCommands = new OperationCommands(operationService, guildConfigRepo);
-  const readinessCommands = new ReadinessCommands(readinessService, guildConfigRepo);
-  const verificationManagementCommands = new VerificationManagementCommands(verificationManagementService, guildConfigRepo);
-  const auditCommands = new AuditCommands(muRoleRepo, wareraService);
+  const recruitmentCommands = new RecruitmentCommands(recruitmentService, guildConfigRepo, roleMappingService);
+  const operationCommands = new OperationCommands(operationService, guildConfigRepo, roleMappingService);
+  const readinessCommands = new ReadinessCommands(readinessService, guildConfigRepo, messageTemplateService, roleMappingService);
+  const verificationManagementCommands = new VerificationManagementCommands(
+    verificationManagementService,
+    guildConfigRepo,
+    roleMappingService
+  );
+  const auditCommands = new AuditCommands(muRoleRepo, guildConfigRepo, wareraService);
   const optimizeCommands = new OptimizeCommands();
 
   const commandRouter = new CommandRouter(
@@ -135,7 +174,7 @@ export async function initDiscordBot(): Promise<Client> {
     startSyncJob(readyClient, roleSyncService, userLinkRepo);
 
     // Start recruitment reminders cron job (daily)
-    startRecruitmentReminderJob(readyClient, wareraService, recruitmentService);
+    startRecruitmentReminderJob(readyClient, wareraService, recruitmentService, roleMappingService, messageTemplateService);
   });
 
   client.on(Events.InteractionCreate, async (interaction: Interaction) => {

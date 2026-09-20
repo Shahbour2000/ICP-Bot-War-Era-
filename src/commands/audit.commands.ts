@@ -7,12 +7,14 @@ import {
   ComponentType,
 } from 'discord.js';
 import { MuRoleRepository } from '../repositories/muRole.repository';
+import { GuildConfigRepository } from '../repositories/guildConfig.repository';
 import { WarEraService } from '../warera/service';
 import { logger } from '../utils/logger';
 
 export class AuditCommands {
   constructor(
     private readonly muRoleRepo: MuRoleRepository,
+    private readonly guildConfigRepo: GuildConfigRepository,
     private readonly wareraService: WarEraService
   ) {}
 
@@ -30,9 +32,18 @@ export class AuditCommands {
     await interaction.deferReply({ ephemeral: true });
 
     try {
-      // 1. Fetch all Egypt MUs from WarEra API and sort alphabetically
-      const egyptMus = await this.wareraService.getAllEgyptMus();
-      egyptMus.sort((a, b) => a.name.localeCompare(b.name));
+      const config = await this.guildConfigRepo.getByGuildId(guild.id);
+      if (!config?.countryId) {
+        await interaction.editReply({
+          content: '❌ This guild has no WarEra country configured yet. Set one first (see the dashboard or `/config`) before running an MU audit.',
+        });
+        return;
+      }
+      const countryName = config.countryName || 'configured country';
+
+      // 1. Fetch all MUs for this guild's configured country and sort alphabetically
+      const countryMus = await this.wareraService.getAllMusForCountry(config.countryId);
+      countryMus.sort((a, b) => a.name.localeCompare(b.name));
 
       // 2. Fetch existing DB mappings for this guild
       const dbMappings = await this.muRoleRepo.listByGuild(guild.id);
@@ -50,7 +61,7 @@ export class AuditCommands {
       const orphanMappings: { name: string; id: string; roleId: string }[] = [];
 
       // Check MUs from API against mappings
-      for (const mu of egyptMus) {
+      for (const mu of countryMus) {
         const mappingsForMu = dbMappings.filter((m) => m.muId === mu._id);
 
         if (mappingsForMu.length === 0) {
@@ -67,7 +78,7 @@ export class AuditCommands {
       }
 
       // Check mappings against Discord roles & WarEra API for orphans/broken
-      const egyptMuIds = new Set(egyptMus.map((m) => m._id));
+      const countryMuIds = new Set(countryMus.map((m) => m._id));
 
       for (const mapping of dbMappings) {
         // Broken check
@@ -76,12 +87,12 @@ export class AuditCommands {
         }
 
         // Orphan check
-        if (!egyptMuIds.has(mapping.muId)) {
+        if (!countryMuIds.has(mapping.muId)) {
           orphanMappings.push({ name: mapping.muName, id: mapping.muId, roleId: mapping.discordRoleId });
         }
       }
 
-      const totalMus = egyptMus.length;
+      const totalMus = countryMus.length;
       const configuredCount = configuredMus.length;
       const missingCount = missingMus.length;
       const coverage = totalMus > 0 ? ((configuredCount / totalMus) * 100).toFixed(1) : '0.0';
@@ -91,10 +102,10 @@ export class AuditCommands {
 
       // Page 1: Executive Summary
       const summaryEmbed = new EmbedBuilder()
-        .setTitle('📊 Egypt MU Audit Summary')
+        .setTitle(`📊 ${countryName} MU Audit Summary`)
         .setColor('#0099ff')
         .setDescription(
-          `**Total Egyptian MUs:** ${totalMus}\n` +
+          `**Total MUs:** ${totalMus}\n` +
           `**Configured:** ${configuredCount}\n` +
           `**Missing:** ${missingCount}\n` +
           `**Coverage:** ${coverage}%\n\n` +
@@ -103,7 +114,7 @@ export class AuditCommands {
           `**Missing Roles:** ${missingCount}\n` +
           `**Orphan Mappings:** ${orphanMappings.length}`
         )
-        .setFooter({ text: 'Egypt Roles Bot • Developed by El-Gaiiar' });
+        .setFooter({ text: `${countryName} Roles Bot` });
 
       if (missingMus.length > 0) {
         const missingList = missingMus.map((m) => `❌ **${m.name}**\n\`/mu-role add mu-id:${m.id} role:\``).join('\n\n');
@@ -111,7 +122,7 @@ export class AuditCommands {
         const truncatedList = missingList.length > 1000 ? missingList.substring(0, 1000) + '... (truncated)' : missingList;
         summaryEmbed.addFields({ name: 'Missing MU Role Mappings', value: truncatedList });
       } else {
-        summaryEmbed.addFields({ name: 'Missing MU Role Mappings', value: '🎉 All Egyptian Military Units are correctly configured.' });
+        summaryEmbed.addFields({ name: 'Missing MU Role Mappings', value: '🎉 All Military Units are correctly configured.' });
       }
 
       // Advanced Checks Fields
@@ -126,7 +137,7 @@ export class AuditCommands {
       }
       if (orphanMappings.length > 0) {
         summaryEmbed.addFields({ 
-          name: '👻 Orphan Mappings (MU not in Egypt anymore)', 
+          name: '👻 Orphan Mappings (MU no longer in this country)', 
           value: orphanMappings.map(o => `${o.name} (ID: ${o.id})`).join('\n') 
         });
       }
@@ -138,8 +149,8 @@ export class AuditCommands {
       let currentPageDetailText = '';
       let detailPageCount = 1;
 
-      for (let i = 0; i < egyptMus.length; i++) {
-        const mu = egyptMus[i];
+      for (let i = 0; i < countryMus.length; i++) {
+        const mu = countryMus[i];
         const isConfigured = configuredMus.find(c => c.id === mu._id);
 
         let statusText = `❌ Missing Role Mapping\n\`/mu-role add mu-id:${mu._id} role:\``;
@@ -149,12 +160,12 @@ export class AuditCommands {
 
         currentPageDetailText += `**• MU Name:** ${mu.name}\n**• MU ID:** \`${mu._id}\`\n**• Discord Role Status:**\n${statusText}\n\n`;
 
-        if ((i + 1) % detailsPerPage === 0 || i === egyptMus.length - 1) {
+        if ((i + 1) % detailsPerPage === 0 || i === countryMus.length - 1) {
           const detailEmbed = new EmbedBuilder()
             .setTitle(`📋 MU Details (Part ${detailPageCount})`)
             .setColor('#2F3136')
             .setDescription(currentPageDetailText)
-            .setFooter({ text: 'Egypt Roles Bot • Developed by El-Gaiiar' });
+            .setFooter({ text: `${countryName} Roles Bot` });
           
           embeds.push(detailEmbed);
           currentPageDetailText = '';

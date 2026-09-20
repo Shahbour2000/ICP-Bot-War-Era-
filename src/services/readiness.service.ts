@@ -1,6 +1,7 @@
 import { prisma } from '../database';
 import { WarEraService } from '../warera/service';
 import { RecruitmentService } from './recruitment.service';
+import { RoleMappingService } from './roleMapping.service';
 import { UserGetUserLiteResponse } from '../types/Responses';
 import { logger } from '../utils/logger';
 import { Guild } from 'discord.js';
@@ -32,7 +33,8 @@ export interface ReadinessReport {
 export class ReadinessService {
   constructor(
     private readonly wareraService: WarEraService,
-    private readonly recruitmentService: RecruitmentService
+    private readonly recruitmentService: RecruitmentService,
+    private readonly roleMappingService: RoleMappingService
   ) {}
 
   /**
@@ -45,8 +47,13 @@ export class ReadinessService {
       where: { guildId: guild.id },
     });
 
-    // 1. Fetch Egypt ID
-    const egyptId = await this.wareraService.getEgyptCountryId();
+    if (!config?.countryId) {
+      logger.warn({ guildId: guild.id }, 'Readiness report skipped: no countryId configured for this guild');
+      // Fall through with everything at zero rather than throwing — a guild that hasn't
+      // configured a country simply has an empty (not broken) readiness report.
+    }
+    const countryId = config?.countryId;
+    const roleMap = config ? await this.roleMappingService.getEnabledMap(config.id) : {};
     const userLinks = await prisma.userLink.findMany();
 
     let verifiedPlayers = 0;
@@ -64,19 +71,19 @@ export class ReadinessService {
           const member = await guild.members.fetch({ user: link.discordId, force: true }).catch(() => null);
           if (!member) return;
 
-          // Check citizen & trusted role requirements
-          if (config) {
-            const hasCitizen = config.citizenRoleId ? member.roles.cache.has(config.citizenRoleId) : true;
-            const hasTrusted = config.trustedRoleId ? member.roles.cache.has(config.trustedRoleId) : true;
-            if (!hasCitizen || !hasTrusted) {
-              return;
-            }
+          // Check citizen & trusted gate role requirements
+          const hasCitizen = roleMap.CITIZEN_GATE ? member.roles.cache.has(roleMap.CITIZEN_GATE) : true;
+          const hasTrusted = roleMap.TRUSTED_GATE ? member.roles.cache.has(roleMap.TRUSTED_GATE) : true;
+          if (!hasCitizen || !hasTrusted) {
+            return;
           }
 
-          const profile = await this.wareraService.getUserProfile(link.wareraUserId);
-          const belongsToEgypt = profile.country === egyptId;
+          if (!countryId) return;
 
-          if (belongsToEgypt) {
+          const profile = await this.wareraService.getUserProfile(link.wareraUserId);
+          const belongsToConfiguredCountry = profile.country === countryId;
+
+          if (belongsToConfiguredCountry) {
             verifiedPlayers++;
             
             // Specialization

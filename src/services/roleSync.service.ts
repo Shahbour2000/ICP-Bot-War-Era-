@@ -9,9 +9,9 @@ import { logger } from '../utils/logger';
 import { prisma } from '../database';
 import { syncMemberNickname } from './nicknameSync.service';
 import { PartyGetByIdResponse } from '../types/Responses';
-
-export const EDUCATION_LVL_1_ROLE_ID = '1525835773230710864';
-export const EDUCATION_LVL_2_ROLE_ID = '1525836096351768616';
+import { RoleMappingService } from './roleMapping.service';
+import { MessageTemplateService } from './messageTemplate.service';
+import { resolveCitizenStatus } from './citizenship.service';
 
 /**
  * A player's position within a specific WarEra political party, as derived
@@ -21,7 +21,7 @@ export const EDUCATION_LVL_2_ROLE_ID = '1525836096351768616';
  */
 export type PartyPosition = 'president' | 'treasurer' | 'council' | 'member' | 'none';
 
-/** The subset of GuildConfig relevant to political party role assignment. */
+/** The subset of a role map relevant to political party role assignment. */
 export interface PartyRoleConfig {
   partyPresidentRoleId?: string | null;
   partyTreasurerRoleId?: string | null;
@@ -68,7 +68,9 @@ export class RoleSyncService {
     private readonly muRoleRepo: MuRoleRepository,
     private readonly levelRoleRepo: LevelRoleRepository,
     private readonly userLinkRepo: UserLinkRepository,
-    private readonly wareraService: WarEraService
+    private readonly wareraService: WarEraService,
+    private readonly roleMappingService: RoleMappingService,
+    private readonly messageTemplateService: MessageTemplateService
   ) {}
 
   /**
@@ -98,6 +100,10 @@ export class RoleSyncService {
 
       const muRoles = await this.muRoleRepo.listByGuild(guild.id);
       const levelRoles = await this.levelRoleRepo.listByGuild(guild.id);
+      // Single source of truth for "which Discord role = which WarEra role type, in THIS
+      // guild" — the old fixed GuildConfig columns (presidentRoleId, etc.) are no longer
+      // read here at all; see RoleMappingService for the full type list.
+      const roleMap = await this.roleMappingService.getEnabledMap(config.id);
 
       // 2. Fetch latest profile
       const profile = await this.wareraService.getUserProfile(userLink.wareraUserId);
@@ -122,12 +128,11 @@ export class RoleSyncService {
       const managedRoleIds = new Set<string>();
       const targetRoleIds = new Set<string>();
 
-      // Country roles
-      [
-        config.presidentRoleId,
-        config.vicePresidentRoleId,
-        config.congressRoleId,
-      ].forEach(id => { if (id) managedRoleIds.add(id); });
+      // Country roles (government positions) — only meaningful if this guild has a
+      // configured countryId; not gated to any specific country.
+      [roleMap.PRESIDENT, roleMap.VICE_PRESIDENT, roleMap.CONGRESS].forEach((id) => {
+        if (id) managedRoleIds.add(id);
+      });
 
       // MU roles
       muRoles.forEach(r => managedRoleIds.add(r.discordRoleId));
@@ -136,61 +141,55 @@ export class RoleSyncService {
       levelRoles.forEach(r => managedRoleIds.add(r.discordRoleId));
 
       // Specialization roles
-      [config.warRoleId, config.economyRoleId, config.hybridRoleId].forEach(id => {
+      [roleMap.WAR_SPECIALIST, roleMap.ECONOMY_SPECIALIST, roleMap.HYBRID_SPECIALIST].forEach((id) => {
         if (id) managedRoleIds.add(id);
       });
 
       // MU Leadership & No MU roles
-      [config.muCommanderRoleId, config.muOwnerRoleId, config.noMuRoleId].forEach(id => {
+      [roleMap.MU_COMMANDER, roleMap.MU_OWNER, roleMap.NO_MU].forEach((id) => {
         if (id) managedRoleIds.add(id);
       });
 
-      // Education roles
-      managedRoleIds.add(EDUCATION_LVL_1_ROLE_ID);
-      managedRoleIds.add(EDUCATION_LVL_2_ROLE_ID);
+      // Education roles — now fully optional/configurable; only managed at all if this
+      // guild has actually mapped at least one of them (previously these were two
+      // hardcoded, always-on Discord role IDs regardless of guild).
+      if (roleMap.EDUCATION_LEVEL_1) managedRoleIds.add(roleMap.EDUCATION_LEVEL_1);
+      if (roleMap.EDUCATION_LEVEL_2) managedRoleIds.add(roleMap.EDUCATION_LEVEL_2);
 
-      // ===== DEBUG: Citizen/Trusted Role Check =====
-      const memberRoleIds = Array.from(member.roles.cache.keys());
-      const memberRoleNames = Array.from(member.roles.cache.values()).map(r => r.name);
-      logger.info({
-        ...logCtx,
-        configuredCitizenRoleId: config.citizenRoleId || 'NOT_CONFIGURED',
-        configuredTrustedRoleId: config.trustedRoleId || 'NOT_CONFIGURED',
-        memberRoleIds,
-        memberRoleNames,
-        hasCitizenResult: config.citizenRoleId ? member.roles.cache.has(config.citizenRoleId) : 'N/A (not configured)',
-        hasTrustedResult: config.trustedRoleId ? member.roles.cache.has(config.trustedRoleId) : 'N/A (not configured)',
-        memberRoleCount: memberRoleIds.length,
-        memberFetchedViaForce: member.id === memberParam.id,
-      }, 'DEBUG: Citizen/Trusted role check details');
-      // ===== END DEBUG =====
+      // Verified-citizen role — only managed at all if this guild has opted into
+      // automatic citizenship checking (see resolveCitizenStatus below).
+      if (config.citizenshipCheckEnabled && roleMap.VERIFIED_CITIZEN) {
+        managedRoleIds.add(roleMap.VERIFIED_CITIZEN);
+      }
 
-      // Check Citizen Role & Trusted Role status (both act as trust/verification checks).
-      // These roles are assigned manually by server staff. They are NOT managed by the bot.
-      // If the member lacks either role, synchronization stops entirely.
-      const hasCitizen = config.citizenRoleId ? member.roles.cache.has(config.citizenRoleId) : true;
-      const hasTrusted = config.trustedRoleId ? member.roles.cache.has(config.trustedRoleId) : true;
-      const isTrusted = hasCitizen || hasTrusted;
+      // Check Citizen Gate & Trusted Gate role status (both act as trust/verification
+      // checks). These roles are assigned manually by server staff — the bot NEVER
+      // assigns or removes them itself. If the member lacks both, synchronization for
+      // every OTHER managed role stops entirely. (Distinct from VERIFIED_CITIZEN above,
+      // which the bot DOES assign automatically based on WarEra country membership —
+      // these are deliberately two separate concepts, see citizenship.service.ts.)
+      const hasCitizenGate = roleMap.CITIZEN_GATE ? member.roles.cache.has(roleMap.CITIZEN_GATE) : true;
+      const hasTrustedGate = roleMap.TRUSTED_GATE ? member.roles.cache.has(roleMap.TRUSTED_GATE) : true;
+      const isTrusted = hasCitizenGate || hasTrustedGate;
 
       if (!isTrusted) {
-        logger.info(logCtx, `Member ${member.user.tag} lacks the citizen or trusted role. All managed roles will be removed.`);
+        logger.info(logCtx, `Member ${member.user.tag} lacks the citizen or trusted gate role. All managed roles will be removed.`);
       } else {
-        // --- Country Roles ---
-        const egyptId = await this.wareraService.getEgyptCountryId();
-        const belongsToEgypt = profile.country === egyptId;
-
-        if (belongsToEgypt) {
-          // Fetch Egypt Government info for presidency / congress
+        // --- Country Roles (Government) ---
+        // Driven entirely by this guild's own configured countryId — no assumption
+        // about which country that is. If this guild hasn't configured one, government
+        // roles are simply never computed (equivalent to "not applicable").
+        if (config.countryId) {
           try {
-            const gov = await this.wareraService.getGovernment(egyptId);
-            if (profile._id === gov.president && config.presidentRoleId) {
-              targetRoleIds.add(config.presidentRoleId);
+            const gov = await this.wareraService.getGovernment(config.countryId);
+            if (profile._id === gov.president && roleMap.PRESIDENT) {
+              targetRoleIds.add(roleMap.PRESIDENT);
             }
-            if (profile._id === gov.vicePresident && config.vicePresidentRoleId) {
-              targetRoleIds.add(config.vicePresidentRoleId);
+            if (profile._id === gov.vicePresident && roleMap.VICE_PRESIDENT) {
+              targetRoleIds.add(roleMap.VICE_PRESIDENT);
             }
-            if (gov.congressMembers && gov.congressMembers.includes(profile._id) && config.congressRoleId) {
-              targetRoleIds.add(config.congressRoleId);
+            if (gov.congressMembers && gov.congressMembers.includes(profile._id) && roleMap.CONGRESS) {
+              targetRoleIds.add(roleMap.CONGRESS);
             }
           } catch (govError) {
             logger.error(
@@ -198,6 +197,18 @@ export class RoleSyncService {
               'Failed to fetch government details during role sync'
             );
           }
+
+          // --- Verified Citizen (automatic) ---
+          // Distinct from the manual CITIZEN_GATE/TRUSTED_GATE roles above: this one IS
+          // assigned/removed automatically by the bot, purely based on whether the
+          // player's own profile.country matches this guild's configured countryId.
+          const citizenStatus = resolveCitizenStatus(profile.country, config);
+          if (citizenStatus === 'citizen' && roleMap.VERIFIED_CITIZEN) {
+            targetRoleIds.add(roleMap.VERIFIED_CITIZEN);
+          }
+          // 'not_citizen' -> deliberately add nothing, so the role falls out of the
+          // add/remove diff naturally. 'not_applicable' can't happen inside this
+          // `if (config.countryId)` branch since resolveCitizenStatus requires it.
         }
 
         // --- MU Roles (Active Membership) ---
@@ -264,11 +275,11 @@ export class RoleSyncService {
 
         let targetSpecRoleId: string | null = null;
         if (warScore >= economyScore * 1.5) {
-          targetSpecRoleId = config.warRoleId;
+          targetSpecRoleId = roleMap.WAR_SPECIALIST || null;
         } else if (economyScore >= warScore * 1.5) {
-          targetSpecRoleId = config.economyRoleId;
+          targetSpecRoleId = roleMap.ECONOMY_SPECIALIST || null;
         } else {
-          targetSpecRoleId = config.hybridRoleId;
+          targetSpecRoleId = roleMap.HYBRID_SPECIALIST || null;
         }
 
         if (targetSpecRoleId) {
@@ -280,8 +291,8 @@ export class RoleSyncService {
         // 1. Global Ownership Check
         // If the player owns ANY Military Unit, they receive both the Owner and Commander roles.
         if (isAnyMuOwner) {
-          if (config.muOwnerRoleId) targetRoleIds.add(config.muOwnerRoleId);
-          if (config.muCommanderRoleId) targetRoleIds.add(config.muCommanderRoleId);
+          if (roleMap.MU_OWNER) targetRoleIds.add(roleMap.MU_OWNER);
+          if (roleMap.MU_COMMANDER) targetRoleIds.add(roleMap.MU_COMMANDER);
         }
 
         // 2. Active MU Check (for non-owners who might be Commanders in their active MU)
@@ -290,8 +301,8 @@ export class RoleSyncService {
             const muDetails = await this.wareraService.getMu(profile.mu);
             const isCommander = muDetails.roles?.commanders?.includes(profile._id) || false;
 
-            if (isCommander && config.muCommanderRoleId) {
-              targetRoleIds.add(config.muCommanderRoleId);
+            if (isCommander && roleMap.MU_COMMANDER) {
+              targetRoleIds.add(roleMap.MU_COMMANDER);
             }
           } catch (muErr) {
             logger.error(
@@ -301,21 +312,23 @@ export class RoleSyncService {
           }
         } else {
           // If they are not actively in ANY Military Unit
-          if (config.noMuRoleId) {
-            targetRoleIds.add(config.noMuRoleId);
+          if (roleMap.NO_MU) {
+            targetRoleIds.add(roleMap.NO_MU);
           }
         }
 
-        // --- Education Roles (Mutually Exclusive) ---
+        // --- Education Roles (Mutually Exclusive, fully optional) ---
         // Rule: A player qualifies for Education LVL 2 ONLY if:
         // - WarEra level >= 15
         // - At least 4 separate companies
         // - At least 4 of those companies are Level 4 or higher (automatedEngine >= 4)
         // If they qualify for Education LVL 2 -> assign Education LVL 2 ONLY (LVL 1 removed).
         // Otherwise -> assign Education LVL 1 ONLY (LVL 2 removed).
+        // If this guild hasn't mapped either role, this entire block is a no-op (neither
+        // ID exists to add to targetRoleIds).
         let qualifiesEducationLvl2 = false;
 
-        if (userLevel >= 15) {
+        if ((roleMap.EDUCATION_LEVEL_1 || roleMap.EDUCATION_LEVEL_2) && userLevel >= 15) {
           try {
             const companies = await this.wareraService.getUserCompanies(profile._id);
             if (companies.length >= 4) {
@@ -341,16 +354,16 @@ export class RoleSyncService {
           }
         }
 
-        if (qualifiesEducationLvl2) {
-          targetRoleIds.add(EDUCATION_LVL_2_ROLE_ID);
-        } else {
-          targetRoleIds.add(EDUCATION_LVL_1_ROLE_ID);
+        if (qualifiesEducationLvl2 && roleMap.EDUCATION_LEVEL_2) {
+          targetRoleIds.add(roleMap.EDUCATION_LEVEL_2);
+        } else if (!qualifiesEducationLvl2 && roleMap.EDUCATION_LEVEL_1) {
+          targetRoleIds.add(roleMap.EDUCATION_LEVEL_1);
         }
 
         // Recruitment Completion Detection: transition to War Specialist
-        if (config.warRoleId) {
-          const previouslyWasNotWar = !member.roles.cache.has(config.warRoleId);
-          const nowIsWar = targetSpecRoleId === config.warRoleId;
+        if (roleMap.WAR_SPECIALIST) {
+          const previouslyWasNotWar = !member.roles.cache.has(roleMap.WAR_SPECIALIST);
+          const nowIsWar = targetSpecRoleId === roleMap.WAR_SPECIALIST;
 
           if (previouslyWasNotWar && nowIsWar) {
             try {
@@ -358,9 +371,10 @@ export class RoleSyncService {
                 where: { guildId: guild.id, active: true },
               });
               if (activeCampaign) {
-                await member.send({
-                  content: `✅ **Thank you for joining the Egyptian military.**\n\nYou are now registered as a War Specialist.\n\n*Future recruitment reminders for this campaign have been stopped for you.*`,
-                }).catch(() => null);
+                const dmText = await this.messageTemplateService.render(config.id, 'recruitment_completion_dm', {
+                  communityName: config.communityName || guild.name,
+                });
+                await member.send({ content: dmText }).catch(() => null);
                 logger.info({ userId: member.id }, 'Recruitment completion DM sent successfully');
               }
             } catch (campaignErr) {
@@ -374,12 +388,13 @@ export class RoleSyncService {
         // player's party is ever stored locally. This guild's configured party (if any)
         // is fetched fresh on every sync, and the player's position within it is derived
         // directly from that party's own leader/treasurer/councilMembers/members fields.
-        const partyRoleIdsConfigured = [
-          config.partyPresidentRoleId,
-          config.partyTreasurerRoleId,
-          config.partyCouncilRoleId,
-          config.partyMemberRoleId,
-        ].some((id) => !!id);
+        const partyMappingConfig: PartyRoleConfig = {
+          partyPresidentRoleId: roleMap.PARTY_PRESIDENT,
+          partyTreasurerRoleId: roleMap.PARTY_TREASURER,
+          partyCouncilRoleId: roleMap.PARTY_COUNCIL,
+          partyMemberRoleId: roleMap.PARTY_MEMBER,
+        };
+        const partyRoleIdsConfigured = Object.values(partyMappingConfig).some((id) => !!id);
 
         if (!config.partyId) {
           if (partyRoleIdsConfigured) {
@@ -401,17 +416,12 @@ export class RoleSyncService {
             // this point on do party roles become part of the managed set for this cycle —
             // if the fetch throws below, none of this runs and existing party roles on the
             // member are left completely untouched.
-            [
-              config.partyPresidentRoleId,
-              config.partyTreasurerRoleId,
-              config.partyCouncilRoleId,
-              config.partyMemberRoleId,
-            ].forEach((id) => {
+            Object.values(partyMappingConfig).forEach((id) => {
               if (id) managedRoleIds.add(id);
             });
 
             const position = determinePartyPosition(party, profile._id);
-            const partyTargetRoles = resolvePartyTargetRoleIds(position, config);
+            const partyTargetRoles = resolvePartyTargetRoleIds(position, partyMappingConfig);
             partyTargetRoles.forEach((id) => targetRoleIds.add(id));
 
             if (position === 'none') {

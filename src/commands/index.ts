@@ -8,6 +8,7 @@ import { ReadinessCommands } from './readiness.commands';
 import { VerificationManagementCommands } from './verificationManagement.commands';
 import { AuditCommands } from './audit.commands';
 import { OptimizeCommands } from './optimize.commands';
+import { ROLE_MAPPING_TYPES } from '../services/roleMapping.service';
 import { logger } from '../utils/logger';
 
 // Slash commands definition mapping
@@ -103,7 +104,7 @@ export const getSlashCommandsDefinition = () => [
       {
         type: ApplicationCommandOptionType.Subcommand,
         name: 'citizen-role',
-        description: 'Set the Egypt Citizen role',
+        description: 'Set the Citizen Gate role (manual prerequisite role)',
         options: [
           {
             type: ApplicationCommandOptionType.Role,
@@ -318,6 +319,103 @@ export const getSlashCommandsDefinition = () => [
             type: ApplicationCommandOptionType.Role,
             name: 'role',
             description: 'The Discord role to assign for ordinary party members',
+            required: true,
+          },
+        ],
+      },
+      {
+        type: ApplicationCommandOptionType.Subcommand,
+        name: 'country-id',
+        description: 'Set the WarEra country this guild represents (for citizen/government sync)',
+        options: [
+          {
+            type: ApplicationCommandOptionType.String,
+            name: 'country-id',
+            description: 'The WarEra country ID',
+            required: true,
+          },
+        ],
+      },
+      {
+        type: ApplicationCommandOptionType.Subcommand,
+        name: 'mu-id',
+        description: 'Set the WarEra Military Unit this guild represents',
+        options: [
+          {
+            type: ApplicationCommandOptionType.String,
+            name: 'mu-id',
+            description: 'The WarEra MU ID',
+            required: true,
+          },
+        ],
+      },
+      {
+        type: ApplicationCommandOptionType.Subcommand,
+        name: 'community',
+        description: 'Set this guild\'s community type and display name',
+        options: [
+          {
+            type: ApplicationCommandOptionType.String,
+            name: 'type',
+            description: 'What kind of community this guild represents',
+            required: true,
+            choices: [
+              { name: 'Country / Government', value: 'COUNTRY_GOVERNMENT' },
+              { name: 'Political Party', value: 'POLITICAL_PARTY' },
+              { name: 'Military Unit', value: 'MILITARY_UNIT' },
+              { name: 'Organization', value: 'ORGANIZATION' },
+              { name: 'Custom', value: 'CUSTOM' },
+            ],
+          },
+          {
+            type: ApplicationCommandOptionType.String,
+            name: 'name',
+            description: 'Display name for this community (used in bot messages)',
+            required: false,
+          },
+        ],
+      },
+      {
+        type: ApplicationCommandOptionType.Subcommand,
+        name: 'branding',
+        description: 'Set this guild\'s dashboard/bot branding',
+        options: [
+          {
+            type: ApplicationCommandOptionType.String,
+            name: 'logo-url',
+            description: 'URL of a logo image for the dashboard',
+            required: false,
+          },
+          {
+            type: ApplicationCommandOptionType.String,
+            name: 'accent-color',
+            description: 'Hex accent color, e.g. #2b2d31',
+            required: false,
+          },
+          {
+            type: ApplicationCommandOptionType.String,
+            name: 'description',
+            description: 'Short description of this community',
+            required: false,
+          },
+        ],
+      },
+      {
+        type: ApplicationCommandOptionType.Subcommand,
+        name: 'role-mapping',
+        description: 'Generic role mapping — set any supported role type directly',
+        options: [
+          {
+            type: ApplicationCommandOptionType.String,
+            name: 'type',
+            description: 'The role mapping type to configure',
+            required: true,
+            choices: ROLE_MAPPING_TYPES.map((t) => ({ name: t, value: t })),
+          },
+          {
+            type: ApplicationCommandOptionType.Role,
+            name: 'role',
+            description: 'The Discord role to assign for this type',
             required: true,
           },
         ],
@@ -551,7 +649,7 @@ export const getSlashCommandsDefinition = () => [
   },
   {
     name: 'readiness',
-    description: 'View the Egypt MoD Military Readiness Report Dashboard',
+    description: 'View this guild\'s Military Readiness Report Dashboard',
     default_member_permissions: PermissionFlagsBits.ManageGuild.toString(),
   },
   {
@@ -573,7 +671,7 @@ export const getSlashCommandsDefinition = () => [
   },
   {
     name: 'mu-audit',
-    description: 'Audit every Egyptian Military Unit against Discord role mappings (Admin only)',
+    description: "Audit every MU in this guild's configured country against Discord role mappings (Admin only)",
     default_member_permissions: PermissionFlagsBits.Administrator.toString(),
   },
   {

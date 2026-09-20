@@ -3,6 +3,8 @@ import { Client } from 'discord.js';
 import { prisma } from '../database';
 import { WarEraService } from '../warera/service';
 import { RecruitmentService } from '../services/recruitment.service';
+import { RoleMappingService } from '../services/roleMapping.service';
+import { MessageTemplateService } from '../services/messageTemplate.service';
 import { logger } from '../utils/logger';
 
 /**
@@ -11,15 +13,15 @@ import { logger } from '../utils/logger';
 export function startRecruitmentReminderJob(
   client: Client,
   wareraService: WarEraService,
-  recruitmentService: RecruitmentService
+  recruitmentService: RecruitmentService,
+  roleMappingService: RoleMappingService,
+  messageTemplateService: MessageTemplateService
 ): cron.ScheduledTask {
   // Run once per day at 12:00 PM: '0 12 * * *'
   const task = cron.schedule('0 12 * * *', async () => {
     logger.info('RecruitmentReminderJob: Started daily recruitment reminder checks');
 
     try {
-      const egyptId = await wareraService.getEgyptCountryId();
-
       // Process each guild
       for (const [, guild] of client.guilds.cache) {
         const campaign = await recruitmentService.getActiveCampaign(guild.id);
@@ -31,6 +33,13 @@ export function startRecruitmentReminderJob(
         const config = await prisma.guildConfig.findUnique({
           where: { guildId: guild.id },
         });
+
+        if (!config?.countryId) {
+          logger.debug({ guildId: guild.id }, 'RecruitmentReminderJob: No countryId configured for this guild. Skipping.');
+          continue;
+        }
+        const countryId = config.countryId;
+        const roleMap = await roleMappingService.getEnabledMap(config.id);
 
         // Fetch non-exempt users who haven't been reminded in the last 23 hours
         const cutoffTime = new Date(Date.now() - 23 * 60 * 60 * 1000);
@@ -55,30 +64,32 @@ export function startRecruitmentReminderJob(
             const member = await guild.members.fetch({ user: link.discordId, force: true }).catch(() => null);
             if (!member) continue;
 
-            // Check citizen & trusted role requirements
-            if (config) {
-              const hasCitizen = config.citizenRoleId ? member.roles.cache.has(config.citizenRoleId) : true;
-              const hasTrusted = config.trustedRoleId ? member.roles.cache.has(config.trustedRoleId) : true;
-              if (!hasCitizen || !hasTrusted) {
-                continue;
-              }
+            // Check citizen & trusted gate role requirements
+            const hasCitizen = roleMap.CITIZEN_GATE ? member.roles.cache.has(roleMap.CITIZEN_GATE) : true;
+            const hasTrusted = roleMap.TRUSTED_GATE ? member.roles.cache.has(roleMap.TRUSTED_GATE) : true;
+            if (!hasCitizen || !hasTrusted) {
+              continue;
             }
 
             // Fetch latest profile to check eligibility
             const profile = await wareraService.getUserProfile(link.wareraUserId);
             const level = profile.leveling?.level || 0;
-            const belongsToEgypt = profile.country === egyptId;
+            const belongsToConfiguredCountry = profile.country === countryId;
             const spec = recruitmentService.getSpecialization(profile);
 
-            if (belongsToEgypt && level >= campaign.minimumLevel && spec !== 'war') {
+            if (belongsToConfiguredCountry && level >= campaign.minimumLevel && spec !== 'war') {
               const specLabel = spec === 'economy' ? 'Economy Specialist' : 'Hybrid';
               
               // Send DM
               const dmUser = await client.users.fetch(link.discordId).catch(() => null);
               if (dmUser) {
-                await dmUser.send({
-                  content: `🇪🇬 **Egypt Ministry of Defense**\n\nYou are eligible for military service.\n\n**Current Status:**\n- Level: \`${level}\` (Requirement: \`${campaign.minimumLevel}\`+)\n- Specialization: \`${specLabel}\`\n\n*Please switch your build to War specialization.*\n\nThis is an automated reminder.`,
+                const dmContent = await messageTemplateService.render(config.id, 'recruitment_reminder_dm', {
+                  communityName: config.communityName || guild.name,
+                  level: String(level),
+                  minimumLevel: String(campaign.minimumLevel),
+                  specialization: specLabel,
                 });
+                await dmUser.send({ content: dmContent });
 
                 // Update last recruitment reminder timestamp
                 await prisma.userLink.update({

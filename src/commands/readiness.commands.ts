@@ -1,12 +1,16 @@
 import { ChatInputCommandInteraction, EmbedBuilder, GuildMember, PermissionFlagsBits } from 'discord.js';
 import { ReadinessService } from '../services/readiness.service';
+import { MessageTemplateService } from '../services/messageTemplate.service';
 import { GuildConfigRepository } from '../repositories/guildConfig.repository';
+import { RoleMappingService } from '../services/roleMapping.service';
 import { logger } from '../utils/logger';
 
 export class ReadinessCommands {
   constructor(
     private readonly readinessService: ReadinessService,
-    private readonly guildConfigRepo: GuildConfigRepository
+    private readonly guildConfigRepo: GuildConfigRepository,
+    private readonly messageTemplateService: MessageTemplateService,
+    private readonly roleMappingService: RoleMappingService
   ) {}
 
   /**
@@ -21,8 +25,14 @@ export class ReadinessCommands {
     }
 
     const config = await this.guildConfigRepo.getByGuildId(interaction.guildId || '');
-    if (config && config.officerRoleId) {
-      return member.roles.cache.has(config.officerRoleId);
+    if (!config) return false;
+
+    // Prefer the new RoleMapping (OFFICER); fall back to the old officerRoleId column
+    // during the compatibility window in case a guild's data hasn't been migrated yet.
+    const roleMap = await this.roleMappingService.getEnabledMap(config.id);
+    const officerRoleId = roleMap.OFFICER || config.officerRoleId;
+    if (officerRoleId) {
+      return member.roles.cache.has(officerRoleId);
     }
 
     return false;
@@ -51,10 +61,16 @@ export class ReadinessCommands {
 
     try {
       const report = await this.readinessService.generateReadinessReport(interaction.guild!);
+      const config = await this.guildConfigRepo.getByGuildId(guildId);
+      const title = config
+        ? await this.messageTemplateService.render(config.id, 'readiness_title', {
+            communityName: config.communityName || interaction.guild!.name,
+          })
+        : `🇪🇬 ${interaction.guild!.name} Ministry of Defense | Military Readiness Report`;
 
       const embed = new EmbedBuilder()
-        .setTitle('🇪🇬 Egypt Ministry of Defense | Military Readiness Report')
-        .setColor('#D00000') // Egypt MoD Red
+        .setTitle(title)
+        .setColor((config?.accentColor as `#${string}`) || '#D00000')
         .addFields(
           {
             name: '👥 Personnel Overview',
@@ -68,7 +84,7 @@ export class ReadinessCommands {
           }
         )
         .setTimestamp()
-        .setFooter({ text: 'Egypt Roles Bot • Developed by El-Gaiiar' });
+        .setFooter({ text: 'WarEra Roles Bot' });
 
       // Add Active Recruitment Campaign if present
       if (report.activeCampaignTitle) {

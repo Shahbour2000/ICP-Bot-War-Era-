@@ -1,12 +1,14 @@
 import { ChatInputCommandInteraction, EmbedBuilder, GuildMember, PermissionFlagsBits } from 'discord.js';
 import { RecruitmentService } from '../services/recruitment.service';
 import { GuildConfigRepository } from '../repositories/guildConfig.repository';
+import { RoleMappingService } from '../services/roleMapping.service';
 import { logger } from '../utils/logger';
 
 export class RecruitmentCommands {
   constructor(
     private readonly recruitmentService: RecruitmentService,
-    private readonly guildConfigRepo: GuildConfigRepository
+    private readonly guildConfigRepo: GuildConfigRepository,
+    private readonly roleMappingService: RoleMappingService
   ) {}
 
   /**
@@ -21,8 +23,14 @@ export class RecruitmentCommands {
     }
 
     const config = await this.guildConfigRepo.getByGuildId(interaction.guildId || '');
-    if (config && config.officerRoleId) {
-      return member.roles.cache.has(config.officerRoleId);
+    if (!config) return false;
+
+    // Prefer the new RoleMapping (OFFICER); fall back to the old officerRoleId column
+    // during the compatibility window in case a guild's data hasn't been migrated yet.
+    const roleMap = await this.roleMappingService.getEnabledMap(config.id);
+    const officerRoleId = roleMap.OFFICER || config.officerRoleId;
+    if (officerRoleId) {
+      return member.roles.cache.has(officerRoleId);
     }
 
     return false;
@@ -127,7 +135,7 @@ export class RecruitmentCommands {
             { name: 'Converted (War Spec)', value: `${stats.convertedCount}`, inline: true },
             { name: 'Remaining (Economy/Hybrid)', value: `${stats.remainingCount}`, inline: true }
           )
-          .setFooter({ text: 'Egypt Roles Bot • Developed by El-Gaiiar' })
+          .setFooter({ text: 'WarEra Roles Bot' })
           .setTimestamp();
 
         await interaction.editReply({ embeds: [embed] });
@@ -146,7 +154,7 @@ export class RecruitmentCommands {
         const embed = new EmbedBuilder()
           .setTitle(`📊 Recruitment Mobilization Report`)
           .setDescription(`Campaign: **"${report.campaign.title}"** (Level ${report.campaign.minimumLevel}+)`)
-          .setColor('#D00000') // MoD Egypt Red
+          .setColor('#D00000') // MoD Red
           .addFields(
             { name: 'Eligible Players', value: `${report.eligibleCount}`, inline: true },
             { name: 'Converted Players', value: `${report.convertedCount}`, inline: true },
@@ -154,7 +162,7 @@ export class RecruitmentCommands {
             { name: 'Overall Conversion Rate', value: `${report.conversionRate.toFixed(1)}%`, inline: false }
           )
           .setTimestamp()
-          .setFooter({ text: 'Egypt Roles Bot • Developed by El-Gaiiar' });
+          .setFooter({ text: 'WarEra Roles Bot' });
 
         // Add MU Breakdown fields
         if (report.muBreakdown.length > 0) {
