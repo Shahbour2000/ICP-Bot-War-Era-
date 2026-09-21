@@ -89,8 +89,15 @@ function sendHtml(res: http.ServerResponse, status: number, html: string, extraH
   res.end(html);
 }
 
-function redirect(res: http.ServerResponse, location: string, extraHeaders?: Record<string, string>): void {
-  res.writeHead(302, { Location: location, ...(extraHeaders || {}) });
+function redirect(
+  res: http.ServerResponse,
+  location: string,
+  extraHeaders?: Record<string, string | string[]>
+): void {
+  res.writeHead(302, {
+    Location: location,
+    ...(extraHeaders || {}),
+  });
   res.end();
 }
 
@@ -189,8 +196,11 @@ export async function handleDashboardRequest(
       logger.info({ discordId: user.id, guildCount: manageable.length }, 'Dashboard: user logged in');
 
       redirect(res, '/dashboard', {
-        'Set-Cookie': [serializeSessionCookie(sessionToken), clearOAuthStateCookie()].join(', '),
-      });
+  'Set-Cookie': [
+    serializeSessionCookie(sessionToken),
+    clearOAuthStateCookie(),
+  ],
+});
     } catch (err) {
       logger.error({ error: (err as Error).message }, 'Dashboard: OAuth callback failed');
       sendHtml(res, 500, renderLoginPage('Login failed — please try again.'), {
