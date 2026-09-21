@@ -83,8 +83,7 @@ export function parseCookies(header: string | undefined): Record<string, string>
 }
 
 function cookieAttrs(maxAgeSeconds: number): string {
-  const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
-  return `HttpOnly; Path=/; Max-Age=${maxAgeSeconds}; SameSite=Lax${secure}`;
+  return `HttpOnly; Path=/; Max-Age=${maxAgeSeconds}; SameSite=Lax; Secure`;
 }
 
 export function serializeSessionCookie(token: string): string {
